@@ -25,3 +25,5 @@ def powerlawNoiseGenerator(N, beta, randomSeed=None):
     time_series_normalized = (time_series - np.mean(time_series)) / np.std(time_series)
     
     return time_series_normalized
+
+
