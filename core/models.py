@@ -256,7 +256,7 @@ class SingleNodeDelayESN:
         self.tau = self.numVirtualNodes * self.theta_steps * self.integrationStep
         self.theta = self.theta_steps * self.integrationStep
 
-        self.mask = np.random.choice([-maskScaling, maskScaling], self.numVirtualNodes)
+        self.input_masks = np.random.choice([-maskScaling, maskScaling], size=(self.inputSize, self.numVirtualNodes))
 
         buffer_size = self.tau_steps + 5
         self.history = deque(np.zeros(buffer_size), maxlen=buffer_size)
@@ -284,11 +284,10 @@ class SingleNodeDelayESN:
         time_in_cycle = t % self.tau
         virtual_node_index = int(math.floor(time_in_cycle / self.theta))
         virtual_node_index = max(0, min(virtual_node_index, self.numVirtualNodes - 1))
-        mask_value = self.mask[virtual_node_index]
-
-        input_value = u_k[0] if self.inputSize == 1 else np.sum(u_k) # Simple sum for now if multi-input
-
-        J_t = self.gamma * mask_value * input_value
+        
+        current_mask_slice = self.input_masks[:, virtual_node_index]
+        J_t = self.gamma * np.dot(current_mask_slice, u_k)
+        
         return J_t
 
     def _updateState_DDE(self, u_k_step, current_sim_time):
@@ -302,7 +301,7 @@ class SingleNodeDelayESN:
             except IndexError:
                 x_delayed = 0.0
 
-        J_t = self._get_masked_input(u_k_step, current_sim_time)
+        J_t = self._get_masked_input(u_k_step, current_sim_time) 
 
         feedback_term = 0.0
         if self.feedback and self.y_prev is not None:
@@ -372,9 +371,7 @@ class SingleNodeDelayESN:
                     else:
                         warnings.warn(f"State collection index {state_collect_idx} out of bounds ({num_effective_k_steps}).")
 
-
-            u_k_vector = u_k if isinstance(u_k, np.ndarray) else np.array([u_k])
-            self._updateState_DDE(u_k_vector, self.simulation_time)
+            self._updateState_DDE(u_k, self.simulation_time)
 
         if collected_states.shape[1] != num_effective_k_steps:
             warnings.warn(f"Collected states shape mismatch after loop: expected {num_effective_k_steps}, got {collected_states.shape[1]}. Truncating/Padding.")
@@ -488,8 +485,7 @@ class SingleNodeDelayESN:
                 if current_k_step_index < numSteps_k:
                     u_k = inputSignal_k[current_k_step_index]
 
-            u_k_vector = u_k if isinstance(u_k, np.ndarray) else np.array([u_k])
-            self._updateState_DDE(u_k_vector, self.simulation_time)
+            self._updateState_DDE(u_k, self.simulation_time)
 
         if current_k_step_index == numSteps_k -1:
             current_global_time = numSteps_k * self.tau
@@ -562,8 +558,7 @@ class SingleNodeDelayESN:
                 if current_k_step_index < numInitial_k:
                     u_k = initialInputs_k[current_k_step_index]
 
-            u_k_vector = u_k if isinstance(u_k, np.ndarray) else np.array([u_k])
-            self._updateState_DDE(u_k_vector, self.simulation_time)
+            self._updateState_DDE(u_k, self.simulation_time)
 
         last_y = self.y_prev
         for k_gen in range(generationSteps_k):
@@ -579,11 +574,9 @@ class SingleNodeDelayESN:
                 if u_k_gen.ndim > 1: u_k_gen = u_k_gen.flatten()
                 if len(u_k_gen) != self.inputSize: raise ValueError(f"output_to_input_mapper must return vector of size {self.inputSize}, got {len(u_k_gen)}")
 
-            u_k_vector = u_k_gen.reshape(1, -1)
-
             num_sim_steps_gen = self.tau_steps
             for _ in range(num_sim_steps_gen):
-                self._updateState_DDE(u_k_vector[0], self.simulation_time)
+                self._updateState_DDE(u_k_gen, self.simulation_time)
 
             current_global_time = (current_k_step_index + 1) * self.tau
             state_vector_k = np.zeros(self.numVirtualNodes)
@@ -603,7 +596,7 @@ class SingleNodeDelayESN:
             self.y_prev = y_k
 
         return predictions
-
+    
 # - Two-node delay, Reservoir computing based on delay-dynamical systems by Lennert Appeltant (6.2) -
 class TwoNodeDelayESN:
     def __init__(self, inputSize, numVirtualNodes, outputSize,
@@ -654,10 +647,8 @@ class TwoNodeDelayESN:
         self.T_step = self.half_tau_steps * self.integrationStep
         self.T_step_steps = self.half_tau_steps
 
-        self.mask1 = np.random.choice([-maskScaling, maskScaling], self.numNodesPerUnit)
-        self.mask2 = np.random.choice([-maskScaling, maskScaling], self.numNodesPerUnit)
-        while np.array_equal(self.mask1, self.mask2):
-            self.mask2 = np.random.choice([-maskScaling, maskScaling], self.numNodesPerUnit)
+        self.input_masks1 = np.random.choice([-maskScaling, maskScaling], size=(self.inputSize, self.numNodesPerUnit))
+        self.input_masks2 = np.random.choice([-maskScaling, maskScaling], size=(self.inputSize, self.numNodesPerUnit))
 
         buffer_size = self.tau_steps + 5
         self.history1 = deque(np.zeros(buffer_size), maxlen=buffer_size)
@@ -667,6 +658,13 @@ class TwoNodeDelayESN:
         self.simulation_time = 0.0
 
         self.feedback = feedback
+
+        if self.feedback:
+            self.feedbackScaling = feedbackScaling
+            self.y_prev = np.zeros(self.outputSize)
+        else:
+            self.feedbackScaling = 0.0
+            self.y_prev = None
 
         self.Wout = None
 
@@ -682,16 +680,13 @@ class TwoNodeDelayESN:
         time_in_half_cycle = t % self.T_step
         virtual_node_index_unit = int(math.floor(time_in_half_cycle / self.theta))
         virtual_node_index_unit = max(0, min(virtual_node_index_unit, self.numNodesPerUnit - 1))
+        
+        current_mask_slice1 = self.input_masks1[:, virtual_node_index_unit]
+        current_mask_slice2 = self.input_masks2[:, virtual_node_index_unit]
 
-        mask_value1 = self.mask1[virtual_node_index_unit]
-        mask_value2 = self.mask2[virtual_node_index_unit]
-
-        if self.inputSize != 1:
-            warnings.warn(f"Input size {self.inputSize} > 1. Assuming scalar input processing.")
-        input_value = u_k[0]
-
-        J1_t = self.gamma * mask_value1 * input_value
-        J2_t = self.gamma * mask_value2 * input_value
+        J1_t = self.gamma * np.dot(current_mask_slice1, u_k)
+        J2_t = self.gamma * np.dot(current_mask_slice2, u_k)
+        
         return J1_t, J2_t
 
     def _get_delayed_state(self, history_deque, steps_ago):
@@ -712,8 +707,12 @@ class TwoNodeDelayESN:
 
         J1_t, J2_t = self._get_masked_inputs(u_k_step, current_sim_time)
 
-        nonlinear_input1 = x1_delayed_tau + x2_delayed_half_tau + J1_t
-        nonlinear_input2 = x2_delayed_tau + x1_delayed_half_tau + J2_t
+        feedback_term = 0.0
+        if self.feedback and self.y_prev is not None:
+            feedback_term = self.feedbackScaling * np.sum(self.y_prev)
+
+        nonlinear_input1 = x1_delayed_tau + x2_delayed_half_tau + J1_t + feedback_term
+        nonlinear_input2 = x2_delayed_tau + x1_delayed_half_tau + J2_t + feedback_term
 
         nonlinear_output1 = self.eta * self.activation(nonlinear_input1)
         nonlinear_output2 = self.eta * self.activation(nonlinear_input2)
@@ -740,7 +739,7 @@ class TwoNodeDelayESN:
         if washout_k >= numSteps_k:
             raise ValueError(f"Washout ({washout_k}) >= numSteps ({numSteps_k}).")
 
-        num_simulation_steps_total = numSteps_k * self.T_step_steps
+        num_simulation_steps_total = numSteps_k * self.half_tau_steps
         num_effective_k_steps = numSteps_k - washout_k
 
         self.x1_current = 0.0
@@ -749,6 +748,9 @@ class TwoNodeDelayESN:
         self.history1 = deque(np.zeros(buffer_size), maxlen=buffer_size)
         self.history2 = deque(np.zeros(buffer_size), maxlen=buffer_size)
         self.simulation_time = 0.0
+        
+        if self.feedback:
+            self.y_prev = np.zeros(self.outputSize)
 
         collected_states = np.zeros((self.numVirtualNodes, num_effective_k_steps))
         state_collect_idx = 0
@@ -757,7 +759,7 @@ class TwoNodeDelayESN:
         u_k = inputSignal_k[current_k_step_index]
 
         for sim_step in range(num_simulation_steps_total):
-            if sim_step > 0 and sim_step % self.T_step_steps == 0:
+            if sim_step > 0 and sim_step % self.half_tau_steps == 0:
                 current_k_step_index += 1
                 if current_k_step_index < numSteps_k:
                     u_k = inputSignal_k[current_k_step_index]
@@ -767,15 +769,16 @@ class TwoNodeDelayESN:
                     state_vector_k = np.zeros(self.numVirtualNodes)
 
                     for i_node_unit in range(self.numNodesPerUnit):
-                        t_sample1 = current_global_time - (self.numNodesPerUnit - (i_node_unit + 1)) * self.theta
+                        t_sample1 = current_global_time - i_node_unit * self.theta
                         steps_ago1 = int(round((current_global_time - t_sample1) / self.integrationStep))
                         state_vector_k[i_node_unit] = self._get_delayed_state(self.history1, steps_ago1)
 
                     for i_node_unit in range(self.numNodesPerUnit):
                         global_node_index = self.numNodesPerUnit + i_node_unit
-                        t_sample2 = current_global_time - (self.numVirtualNodes - (global_node_index + 1)) * self.theta
+                        t_sample2 = current_global_time - i_node_unit * self.theta
                         steps_ago2 = int(round((current_global_time - t_sample2) / self.integrationStep))
                         state_vector_k[global_node_index] = self._get_delayed_state(self.history2, steps_ago2)
+
 
                     if state_collect_idx < num_effective_k_steps:
                         collected_states[:, state_collect_idx] = state_vector_k
@@ -783,8 +786,7 @@ class TwoNodeDelayESN:
                     else:
                         warnings.warn(f"State collection index {state_collect_idx} out of bounds ({num_effective_k_steps}).")
 
-            u_k_vector = u_k if isinstance(u_k, np.ndarray) else np.array([u_k])
-            self._updateStates_CoupledDDE(u_k_vector, self.simulation_time)
+            self._updateStates_CoupledDDE(u_k, self.simulation_time)
 
         if collected_states.shape[1] != num_effective_k_steps:
             warnings.warn(f"Collected states shape mismatch after loop: expected {num_effective_k_steps}, got {collected_states.shape[1]}. Truncating/Padding.")
@@ -856,26 +858,29 @@ class TwoNodeDelayESN:
             self.history1 = deque(np.zeros(buffer_size), maxlen=buffer_size)
             self.history2 = deque(np.zeros(buffer_size), maxlen=buffer_size)
             self.simulation_time = 0.0
+            if self.feedback: self.y_prev = np.zeros(self.outputSize)
 
-        num_simulation_steps_total = numSteps_k * self.T_step_steps
+        num_simulation_steps_total = numSteps_k * self.half_tau_steps
         pred_collect_idx = 0
         state_collect_idx = 0
         current_k_step_index = 0
         u_k = inputSignal_k[current_k_step_index]
 
         for sim_step in range(num_simulation_steps_total):
-            if sim_step > 0 and sim_step % self.T_step_steps == 0:
+            if sim_step > 0 and sim_step % self.half_tau_steps == 0:
                 current_k_step_index += 1
 
                 current_global_time = current_k_step_index * self.T_step
                 state_vector_k_minus_1 = np.zeros(self.numVirtualNodes)
+
                 for i_node_unit in range(self.numNodesPerUnit):
-                    t_sample1 = current_global_time - (self.numNodesPerUnit - (i_node_unit + 1)) * self.theta
+                    t_sample1 = current_global_time - i_node_unit * self.theta
                     steps_ago1 = int(round((current_global_time - t_sample1) / self.integrationStep))
                     state_vector_k_minus_1[i_node_unit] = self._get_delayed_state(self.history1, steps_ago1)
+
                 for i_node_unit in range(self.numNodesPerUnit):
                     global_node_index = self.numNodesPerUnit + i_node_unit
-                    t_sample2 = current_global_time - (self.numVirtualNodes - (global_node_index + 1)) * self.theta
+                    t_sample2 = current_global_time - i_node_unit * self.theta
                     steps_ago2 = int(round((current_global_time - t_sample2) / self.integrationStep))
                     state_vector_k_minus_1[global_node_index] = self._get_delayed_state(self.history2, steps_ago2)
 
@@ -889,24 +894,27 @@ class TwoNodeDelayESN:
                         state_collect_idx += 1
                     else:
                         warnings.warn("Prediction index out of bounds, check logic.")
+                
+                if self.feedback:
+                    self.y_prev = y_k_minus_1
 
                 if current_k_step_index < numSteps_k:
                     u_k = inputSignal_k[current_k_step_index]
 
-            u_k_vector = u_k if isinstance(u_k, np.ndarray) else np.array([u_k])
-            self._updateStates_CoupledDDE(u_k_vector, self.simulation_time)
+            self._updateStates_CoupledDDE(u_k, self.simulation_time)
 
         if current_k_step_index == numSteps_k -1:
             current_global_time = numSteps_k * self.T_step
             state_vector_last_k = np.zeros(self.numVirtualNodes)
+
             for i_node_unit in range(self.numNodesPerUnit):
-                t_sample1 = current_global_time - (self.numNodesPerUnit - (i_node_unit + 1)) * self.theta
+                t_sample1 = current_global_time - i_node_unit * self.theta
                 steps_ago1 = int(round((current_global_time - t_sample1) / self.integrationStep))
                 state_vector_last_k[i_node_unit] = self._get_delayed_state(self.history1, steps_ago1)
             
             for i_node_unit in range(self.numNodesPerUnit):
                 global_node_index = self.numNodesPerUnit + i_node_unit
-                t_sample2 = current_global_time - (self.numVirtualNodes - (global_node_index + 1)) * self.theta
+                t_sample2 = current_global_time - i_node_unit * self.theta
                 steps_ago2 = int(round((current_global_time - t_sample2) / self.integrationStep))
                 state_vector_last_k[global_node_index] = self._get_delayed_state(self.history2, steps_ago2)
 
@@ -918,6 +926,9 @@ class TwoNodeDelayESN:
                     internal_states[:, state_collect_idx] = state_vector_last_k
                     pred_collect_idx += 1
                     state_collect_idx += 1
+            
+            if self.feedback:
+                self.y_prev = y_last_k
 
         if predictions.shape[0] != effective_pred_steps_k:
             warnings.warn(f"Final prediction shape mismatch: expected {effective_pred_steps_k}, got {predictions.shape[0]}. Adjusting.")
@@ -942,37 +953,41 @@ class TwoNodeDelayESN:
         self.history1 = deque(np.zeros(buffer_size), maxlen=buffer_size)
         self.history2 = deque(np.zeros(buffer_size), maxlen=buffer_size)
         self.simulation_time = 0.0
+        
+        self.y_prev = np.zeros(self.outputSize)
         last_y = np.zeros(self.outputSize)
 
         current_k_step_index = 0
         u_k = initialInputs_k[current_k_step_index]
-        num_sim_steps_warmup = numInitial_k * self.T_step_steps
+        num_sim_steps_warmup = numInitial_k * self.half_tau_steps
 
         for sim_step in range(num_sim_steps_warmup):
-            if sim_step > 0 and sim_step % self.T_step_steps == 0:
+            if sim_step > 0 and sim_step % self.half_tau_steps == 0:
                 current_k_step_index += 1
                 current_global_time = current_k_step_index * self.T_step
                 state_vector_k_minus_1 = np.zeros(self.numVirtualNodes)
                 for i_node_unit in range(self.numNodesPerUnit):
-                    t_sample1 = current_global_time - (self.numNodesPerUnit - (i_node_unit + 1)) * self.theta
+                    t_sample1 = current_global_time - i_node_unit * self.theta
                     steps_ago1 = int(round((current_global_time - t_sample1) / self.integrationStep))
                     state_vector_k_minus_1[i_node_unit] = self._get_delayed_state(self.history1, steps_ago1)
                 
                 for i_node_unit in range(self.numNodesPerUnit):
                     global_node_index = self.numNodesPerUnit + i_node_unit
-                    t_sample2 = current_global_time - (self.numVirtualNodes - (global_node_index + 1)) * self.theta
+                    t_sample2 = current_global_time - i_node_unit * self.theta
                     steps_ago2 = int(round((current_global_time - t_sample2) / self.integrationStep))
                     state_vector_k_minus_1[global_node_index] = self._get_delayed_state(self.history2, steps_ago2)
 
                 y_k_minus_1 = (self.Wout @ state_vector_k_minus_1).flatten()
                 predictions[current_k_step_index - 1] = y_k_minus_1
                 last_y = y_k_minus_1
+                
+                if self.feedback:
+                    self.y_prev = y_k_minus_1
 
                 if current_k_step_index < numInitial_k:
                     u_k = initialInputs_k[current_k_step_index]
 
-            u_k_vector = u_k if isinstance(u_k, np.ndarray) else np.array([u_k])
-            self._updateStates_CoupledDDE(u_k_vector, self.simulation_time)
+            self._updateStates_CoupledDDE(u_k, self.simulation_time)
 
         for k_gen in range(generationSteps_k):
             current_k_step_index = numInitial_k + k_gen
@@ -987,29 +1002,28 @@ class TwoNodeDelayESN:
                 if u_k_gen.ndim > 1: u_k_gen = u_k_gen.flatten()
                 if len(u_k_gen) != self.inputSize: raise ValueError(f"output_to_input_mapper failed size check.")
 
-            u_k_vector = u_k_gen.reshape(1, -1)
-
-            num_sim_steps_gen = self.T_step_steps
+            num_sim_steps_gen = self.half_tau_steps
             for _ in range(num_sim_steps_gen):
-                self._updateStates_CoupledDDE(u_k_vector[0], self.simulation_time)
+                self._updateStates_CoupledDDE(u_k_gen, self.simulation_time)
 
             current_global_time = (current_k_step_index + 1) * self.T_step
             state_vector_k = np.zeros(self.numVirtualNodes)
             for i_node_unit in range(self.numNodesPerUnit):
-                t_sample1 = current_global_time - (self.numNodesPerUnit - (i_node_unit + 1)) * self.theta
+                t_sample1 = current_global_time - i_node_unit * self.theta
                 steps_ago1 = int(round((current_global_time - t_sample1) / self.integrationStep))
                 state_vector_k[i_node_unit] = self._get_delayed_state(self.history1, steps_ago1)
 
             for i_node_unit in range(self.numNodesPerUnit):
                 global_node_index = self.numNodesPerUnit + i_node_unit
-                t_sample2 = current_global_time - (self.numVirtualNodes - (global_node_index + 1)) * self.theta
+                t_sample2 = current_global_time - i_node_unit * self.theta
                 steps_ago2 = int(round((current_global_time - t_sample2) / self.integrationStep))
                 state_vector_k[global_node_index] = self._get_delayed_state(self.history2, steps_ago2)
 
             y_k = (self.Wout @ state_vector_k).flatten()
             predictions[current_k_step_index] = y_k
+            
             last_y = y_k
+            if self.feedback:
+                self.y_prev = y_k
 
         return predictions
-    
-# - -

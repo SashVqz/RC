@@ -112,10 +112,7 @@ class DelayPipeline:
         input_cols = np.array(input_cols)
         target_cols = np.array(target_cols)
 
-        if self.esn.inputSize == 1 and len(input_cols) > 1:
-            input_cols = input_cols[[0]]
-
-        elif len(input_cols) != self.esn.inputSize:
+        if len(input_cols) != self.esn.inputSize:
             raise ValueError(f"Number of input_cols ({len(input_cols)}) does not match ESN inputSize ({self.esn.inputSize}).")
 
         if len(target_cols) != self.esn.outputSize:
@@ -136,13 +133,16 @@ class DelayPipeline:
 
         trainInput = self.trainData_scaled_full[:-predictionHorizon][:, input_cols]
         trainTarget = self.trainData_scaled_full[predictionHorizon:][:, target_cols]
-        testInput = self.testData_scaled_full[:-predictionHorizon][:, input_cols]
+        testInput = self.testData_scaled_full[:-predictionHorizon][:, inputcols]
         testTarget = self.testData_scaled_full[predictionHorizon:][:, target_cols]
 
         self.original_testTarget_scaled = testTarget
 
         if trainTarget.ndim == 1: trainTarget = trainTarget.reshape(-1, 1)
         if testTarget.ndim == 1: testTarget = testTarget.reshape(-1, 1)
+        
+        if trainInput.ndim == 1: trainInput = trainInput.reshape(-1, 1)
+        if testInput.ndim == 1: testInput = testInput.reshape(-1, 1)
 
         return trainInput, trainTarget, testInput, testTarget
 
