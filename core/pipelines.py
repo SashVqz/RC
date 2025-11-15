@@ -133,7 +133,7 @@ class DelayPipeline:
 
         trainInput = self.trainData_scaled_full[:-predictionHorizon][:, input_cols]
         trainTarget = self.trainData_scaled_full[predictionHorizon:][:, target_cols]
-        testInput = self.testData_scaled_full[:-predictionHorizon][:, inputcols]
+        testInput = self.testData_scaled_full[:-predictionHorizon][:, input_cols]
         testTarget = self.testData_scaled_full[predictionHorizon:][:, target_cols]
 
         self.original_testTarget_scaled = testTarget

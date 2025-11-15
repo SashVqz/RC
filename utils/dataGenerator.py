@@ -27,3 +27,18 @@ def powerlawNoiseGenerator(N, beta, randomSeed=None):
     return time_series_normalized
 
 
+def mackeyGlassGenerator(length, tau=17, delta_t=1, beta=0.2, gamma=0.1, n=10, x0=1.2):
+    """
+    Generate Mackey-Glass time series using Euler method for numerical integration.
+    """
+    x = np.zeros(length)
+    x[0] = x0
+    for t in range(1, length):
+        if t - tau >= 0:
+            x_tau = x[t - tau]
+        else:
+            x_tau = 0.0
+        dx_dt = beta * x_tau / (1 + x_tau**n) - gamma * x[t - 1]
+        x[t] = x[t - 1] + dx_dt * delta_t
+    return x
+
